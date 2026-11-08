@@ -1,0 +1,310 @@
+name: Upstream sync and Docker publish
+
+on:
+  repository_dispatch:
+    types:
+      - upstream-sync
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: Run validation and publish even when upstream has no new commits.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-and-publish:
+    name: Merge upstream, run CI, and publish the app image
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      UPSTREAM_REPO: https://github.com/CopilotKit/OpenDots.git
+      DOCKERHUB_NAMESPACE: mr0007oo
+      DOCKERHUB_REPOSITORY: opendots
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git and fetch upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch --no-tags --prune origin main
+          git fetch --no-tags --prune upstream main
+
+      - name: Detect upstream updates
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_sha="$(git rev-parse upstream/main)"
+          upstream_short="${upstream_sha:0:12}"
+          unique_commits="$(git rev-list --count origin/main..upstream/main)"
+          force_sync="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_sync == 'true' }}"
+
+          if [[ "$unique_commits" -gt 0 || "$force_sync" == "true" ]]; then
+            needs_sync=true
+          else
+            needs_sync=false
+          fi
+
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "upstream_short=${upstream_short}" >> "$GITHUB_OUTPUT"
+          echo "unique_commits=${unique_commits}" >> "$GITHUB_OUTPUT"
+          echo "needs_sync=${needs_sync}" >> "$GITHUB_OUTPUT"
+
+          echo "## Upstream sync status" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upstream SHA: ${upstream_sha}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upstream commits not yet in fork main: ${unique_commits}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$needs_sync" == "true" ]]; then
+            echo "- A candidate merge will be validated before fork main or Docker Hub is updated." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- No upstream changes were detected; the workflow will not push or publish." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Create and validate candidate merge
+        id: candidate
+        if: steps.detect.outputs.needs_sync == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sync_branch="sync/upstream-${{ steps.detect.outputs.upstream_short }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git checkout -b "$sync_branch" origin/main
+
+          if ! git merge --no-edit upstream/main; then
+            echo "## Upstream merge stopped due to conflicts" >> "$GITHUB_STEP_SUMMARY"
+            git diff --name-only --diff-filter=U > conflict-files.txt || true
+            if [[ -s conflict-files.txt ]]; then
+              echo "Conflicting files:" >> "$GITHUB_STEP_SUMMARY"
+              sed 's/^/- /' conflict-files.txt >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "No candidate branch was pushed and no image will be published." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          candidate_sha="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "${{ steps.detect.outputs.upstream_sha }}" "$candidate_sha"; then
+            echo "The candidate does not contain the fetched upstream main commit." >&2
+            exit 1
+          fi
+
+          for required_file in \
+            src/browser/service.ts \
+            src/server/dot-agent.ts \
+            tests/browser-service.test.ts \
+            tests/tanstack-agent.test.ts \
+            docs/DOCKER.md \
+            docs/UPSTREAM_SYNC.md
+          do
+            if [[ ! -s "$required_file" ]]; then
+              echo "Required fork-specific file is missing after merge: $required_file" >&2
+              exit 1
+            fi
+          done
+
+          grep -Fq 'AS app' Dockerfile
+          grep -Fq 'AS browser' Dockerfile
+          grep -Fq 'obscura:' compose.yml
+          grep -Fq '## Fork sync and Docker publishing' README.md
+          grep -Fq 'Obscura-backed isolated public-page reader' README.md
+          grep -Fq '[Docker deployment](docs/DOCKER.md)' README.md
+
+          version="$(node -p "require('./package.json').version")"
+          candidate_short="${candidate_sha:0:12}"
+          version_tag="v${version}-${candidate_short}"
+          echo "sync_branch=${sync_branch}" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=${candidate_sha}" >> "$GITHUB_OUTPUT"
+          echo "version_tag=${version_tag}" >> "$GITHUB_OUTPUT"
+          echo "- Candidate merge: ${candidate_sha}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upstream main is included and fork-specific implementation sentinels are present." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push candidate branch without changing main
+        if: steps.detect.outputs.needs_sync == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin "${{ steps.candidate.outputs.sync_branch }}"
+          echo "- Candidate branch pushed for CI; main is unchanged." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch CI for the exact candidate commit
+        if: steps.detect.outputs.needs_sync == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --ref "${{ steps.candidate.outputs.sync_branch }}"
+          echo "- CI was explicitly dispatched for candidate ${{ steps.candidate.outputs.candidate_sha }}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for candidate CI
+        id: ci
+        if: steps.detect.outputs.needs_sync == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ steps.candidate.outputs.candidate_sha }}"
+          sync_branch="${{ steps.candidate.outputs.sync_branch }}"
+          ci_run_id=""
+
+          for attempt in $(seq 1 60); do
+            ci_run_id="$(gh run list \
+              --workflow ci.yml \
+              --branch "$sync_branch" \
+              --event workflow_dispatch \
+              --json databaseId,headSha \
+              --limit 20 | jq -r --arg sha "$candidate_sha" \
+                '[.[] | select(.headSha == $sha)] | first | .databaseId // empty')"
+            if [[ -n "$ci_run_id" ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [[ -z "$ci_run_id" ]]; then
+            echo "No CI run appeared for candidate $candidate_sha; refusing to publish." >&2
+            exit 1
+          fi
+
+          echo "ci_run_id=${ci_run_id}" >> "$GITHUB_OUTPUT"
+          timeout 75m gh run watch "$ci_run_id" --exit-status --interval 15
+          echo "- CI run ${ci_run_id} passed for candidate ${candidate_sha}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fast-forward fork main to the tested candidate
+        id: publish-main
+        if: steps.detect.outputs.needs_sync == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor origin/main "${{ steps.candidate.outputs.candidate_sha }}"; then
+            echo "Fork main advanced independently while CI ran; refusing to overwrite or publish the stale candidate." >&2
+            exit 1
+          fi
+          git push origin "${{ steps.candidate.outputs.candidate_sha }}:refs/heads/main"
+          echo "- Fork main was advanced by a normal fast-forward push after CI passed." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate Docker Hub credentials and image references
+        id: image-refs
+        if: steps.detect.outputs.needs_sync == 'true'
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          VERSION_TAG: ${{ steps.candidate.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "Docker Hub username/token secrets must be configured before publishing." >&2
+            exit 1
+          fi
+
+          normalized_username="$(printf '%s' "$DOCKERHUB_USERNAME" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$normalized_username" != "$DOCKERHUB_NAMESPACE" ]]; then
+            echo "DOCKERHUB_USERNAME must identify the configured Docker Hub namespace." >&2
+            exit 1
+          fi
+
+          image_base="docker.io/${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}"
+          latest_ref="${image_base}:latest"
+          version_ref="${image_base}:${VERSION_TAG}"
+          name_pattern='^docker\.io/[a-z0-9]+(/[a-z0-9]+)+$'
+          tag_pattern='^[a-z0-9_][a-z0-9_.-]{0,127}$'
+
+          if [[ "$image_base" != "${image_base,,}" || ! "$image_base" =~ $name_pattern ]]; then
+            echo "Generated Docker Hub image name is invalid or contains uppercase characters: ${image_base}" >&2
+            exit 1
+          fi
+
+          for ref in "$latest_ref" "$version_ref"; do
+            ref_tag="${ref##*:}"
+            if [[ "$ref" != "${ref,,}" || "$ref" != "${image_base}:"* || ! "$ref_tag" =~ $tag_pattern ]]; then
+              echo "Generated Docker image reference is invalid or not lowercase: ${ref}" >&2
+              exit 1
+            fi
+          done
+
+          echo "latest=${latest_ref}" >> "$GITHUB_OUTPUT"
+          echo "version=${version_ref}" >> "$GITHUB_OUTPUT"
+          echo "- Docker Hub references validated: ${latest_ref} and ${version_ref}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Login to Docker Hub
+        if: steps.detect.outputs.needs_sync == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        if: steps.detect.outputs.needs_sync == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.detect.outputs.needs_sync == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push multi-arch application images
+        if: steps.detect.outputs.needs_sync == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: app
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.image-refs.outputs.latest }}
+            ${{ steps.image-refs.outputs.version }}
+
+      - name: Verify published image manifests
+        if: steps.detect.outputs.needs_sync == 'true'
+        shell: bash
+        env:
+          LATEST_IMAGE: ${{ steps.image-refs.outputs.latest }}
+          VERSION_IMAGE: ${{ steps.image-refs.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "$LATEST_IMAGE" > manifest-latest.json
+          docker buildx imagetools inspect --raw "$VERSION_IMAGE" > manifest-version.json
+
+          for manifest in manifest-latest.json manifest-version.json; do
+            for architecture in amd64 arm64; do
+              jq -e --arg architecture "$architecture" \
+                '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture)' \
+                "$manifest" >/dev/null
+            done
+          done
+
+          echo "## Docker publish summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Published: ${LATEST_IMAGE}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Published: ${VERSION_IMAGE}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- AMD64 and ARM64 manifests verified for all published tags." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write final workflow summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Final update summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Repository: ${GITHUB_REPOSITORY}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Trigger: ${GITHUB_EVENT_NAME}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upstream commit: ${{ steps.detect.outputs.upstream_sha || 'not available' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Candidate CI run: ${{ steps.ci.outputs.ci_run_id || 'not dispatched' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Candidate pushed to main: ${{ steps.publish-main.outcome == 'success' && 'yes' || 'no' }}" >> "$GITHUB_STEP_SUMMARY"

@@ -188,6 +188,13 @@ npx copilotkit@latest project select
 Do not run `copilotkit onboard` in this folder. OpenDots already contains its CopilotKit integration, and onboarding adds a second, generic one.
 
 See [Setup](docs/SETUP.md) for configuration, Slack, calls, the browser service, and Docker.
+For Docker deployment, Obscura architecture, ARM64 support, and image publishing, see [Docker deployment](docs/DOCKER.md).
+
+## Fork sync and Docker publishing
+
+This fork includes an upstream synchronization workflow that merges updates on a candidate branch, checks fork-specific Obscura, Docker, tool-calling, and README markers, and stops on conflicts. It explicitly runs CI against the candidate before fast-forwarding `main` or publishing the multi-arch application image.
+
+See [Upstream sync and Docker publishing](docs/UPSTREAM_SYNC.md) for the trigger behavior, GitHub secret setup, conflict handling, and publishing details.
 
 ## Data and privacy
 
@@ -207,13 +214,13 @@ CopilotKit SDK telemetry collects usage metadata separately from conversation pe
 | Slack                      | Managed Channels SDK declaration with workspace and user allowlists                                                                     |
 | Calls                      | WebRTC speech, delegated compute, bounded sessions, hangup, and timeline receipts                                                       |
 | Background work            | Scheduled server-side turns in their original conversation, with pause and retry controls                                               |
-| Browser                    | Separate read-only public-page service with page capture and navigation limits                                                          |
+| Browser                    | Obscura-backed isolated public-page reader; persistent interactive Dot computers remain on OpenBot                                      |
 | Dot computers              | Per-Dot browser profiles, files, shell, takeover, permissions, and action records through OpenBot                                       |
 | Connections                | Per-Dot MCP servers, Composio connected apps, per-tool access, and owner approval for MCP write actions                                 |
 | Appearance                 | System, light, and dark themes; dark colors are derived at build time from the light styles                                             |
 | Memory                     | User-managed preferences that permitted Dots can use                                                                                    |
 | Automatic Learning         | Per-Dot Learning containers, conversation evidence routing, and published-skill delivery; see [setup](docs/SETUP.md#automatic-learning) |
-| Deployment                 | Local Node setup and separate application/browser containers                                                                            |
+| Deployment                 | Local Node setup and separate application, browser-gateway, and Obscura containers                                                      |
 
 Scheduled tasks run in their original conversation. If a worker stops or its lease expires during a run, OpenDots marks that run **Interrupted** and waits for an explicit retry. Review its pages and computer actions, then use **Retry after review** when appropriate. Completed effects may already be present even when a run has no final result.
 

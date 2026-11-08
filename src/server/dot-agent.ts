@@ -174,8 +174,7 @@ export class DotAgent extends AbstractAgent {
         const tools: ToolDefinition[] =
           dot.researchAllowed &&
           initialSettings.researchAllowed &&
-          this.config.webSearchProvider === 'browser' &&
-          !computer.configured
+          this.config.webSearchProvider === 'browser'
             ? [
                 defineTool({
                   name: 'read_public_page',

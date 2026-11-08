@@ -79,6 +79,26 @@ function createPageCall(args: Record<string, unknown>) {
   );
 }
 
+function createPageCalls(
+  calls: Array<{ id: string; title: string; content: string }>,
+) {
+  return completion(
+    {
+      role: 'assistant',
+      tool_calls: calls.map(({ id, title, content }, index) => ({
+        index,
+        id,
+        type: 'function',
+        function: {
+          name: 'create_space_page',
+          arguments: JSON.stringify({ title, content }),
+        },
+      })),
+    },
+    'tool_calls',
+  );
+}
+
 it('executes a page tool, continues with its result, and emits AG-UI text and tool events', async () => {
   const f = fixture();
   const network = vi
@@ -134,6 +154,61 @@ it('executes a page tool, continues with its result, and emits AG-UI text and to
         role: 'tool',
         tool_call_id: 'create-page',
         content: expect.stringContaining('Notes'),
+      }),
+    ]),
+  );
+});
+
+it('executes sequential and parallel tool calls and returns every result to the model', async () => {
+  const f = fixture();
+  const network = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(
+      createPageCalls([
+        { id: 'first-page', title: 'First', content: '# First' },
+      ]),
+    )
+    .mockResolvedValueOnce(
+      createPageCalls([
+        { id: 'second-page', title: 'Second', content: '# Second' },
+        { id: 'third-page', title: 'Third', content: '# Third' },
+      ]),
+    )
+    .mockResolvedValueOnce(
+      completion({ role: 'assistant', content: 'Created all three pages.' }),
+    );
+  const events = await lastValueFrom(f.agent.run(f.input).pipe(toArray()));
+  expect(network).toHaveBeenCalledTimes(3);
+  expect(f.workspace.pages.list(f.dot.spaceId)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ title: 'First' }),
+      expect.objectContaining({ title: 'Second' }),
+      expect.objectContaining({ title: 'Third' }),
+    ]),
+  );
+  const continuation = JSON.parse(String(network.mock.calls[2][1]?.body));
+  const toolResults = continuation.messages.filter(
+    (message: { role: string }) => message.role === 'tool',
+  );
+  expect(toolResults).toHaveLength(3);
+  expect(
+    toolResults.map(
+      (message: { tool_call_id: string }) => message.tool_call_id,
+    ),
+  ).toEqual(
+    expect.arrayContaining(['first-page', 'second-page', 'third-page']),
+  );
+  expect(
+    events.filter((event) => event.type === EventType.TOOL_CALL_START),
+  ).toHaveLength(3);
+  expect(
+    events.filter((event) => event.type === EventType.TOOL_CALL_RESULT),
+  ).toHaveLength(3);
+  expect(events).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: EventType.TEXT_MESSAGE_CHUNK,
+        delta: 'Created all three pages.',
       }),
     ]),
   );
@@ -207,6 +282,42 @@ it('offers the canonical review tool and waits for the client without saving a p
     false,
   );
   expect(f.workspace.pages.list(f.dot.spaceId)).toEqual(before);
+});
+
+it('keeps the Obscura reader available alongside configured computer tools', async () => {
+  const f = fixture();
+  const agent = new DotAgent(
+    f.store,
+    f.workspace,
+    {
+      intelligenceKey: 'fixture',
+      apiKey: 'fixture',
+      model: 'custom-model',
+      baseUrl: 'https://unused.invalid/v1',
+      runtimeUrl: '',
+      voiceName: 'marin',
+      slackUsers: [],
+      webSearchProvider: 'browser',
+      browserUrl: 'http://browser:4311',
+      browserSecret: 'browser-secret',
+      computerSupervisorUrl: 'http://supervisor:4300',
+      computerSupervisorToken: 'supervisor-token',
+      computerToken: 'computer-token',
+    },
+    f.dot.id,
+  );
+  const network = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValueOnce(
+      completion({ role: 'assistant', content: 'Ready.' }),
+    );
+  await lastValueFrom(agent.run(f.input).pipe(toArray()));
+  const request = JSON.parse(String(network.mock.calls[0][1]?.body));
+  const names = request.tools.map(
+    (tool: { function: { name: string } }) => tool.function.name,
+  );
+  expect(names).toContain('read_public_page');
+  expect(names).toContain('computer_snapshot');
 });
 
 it('validates tool arguments before making a page change', async () => {

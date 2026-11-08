@@ -101,14 +101,19 @@ Back up both storage layers: SQLite contains page content and thread bindings; t
 
 Parallel is selected by default (`WEB_SEARCH_PROVIDER=parallel`). Live research needs the model configuration, but no browser worker. An optional server-side `PARALLEL_API_KEY` enables authenticated usage and higher limits. The anonymous MCP endpoint is free for light use. Queries, selected URLs, research objectives and a stable session identifier go to Parallel. See [public-web research](../README.md#public-web-research) for data sharing, permissions and limitations.
 
-Set `WEB_SEARCH_PROVIDER=disabled` to turn off these research tools, or `WEB_SEARCH_PROVIDER=browser` for the existing URL-only reader. The browser service reads a supplied public URL and returns page text and a capture. Configure `BROWSER_URL` and `BROWSER_SECRET`, then run:
+Set `WEB_SEARCH_PROVIDER=disabled` to turn off these research tools, or `WEB_SEARCH_PROVIDER=browser` for the Obscura-backed URL reader. It loads a supplied public URL in an isolated browser context and returns page text and a capture. The Node browser gateway connects to Obscura over its authenticated CDP endpoint; website requests are routed through the gateway's public-address and DNS-pinning checks.
 
 ```sh
-npx playwright install chromium
+# In one terminal, load the private configuration and run Obscura on loopback.
+set -a
+. ./.env
+set +a
+obscura serve --host 127.0.0.1 --port 9222
+# In another terminal:
 npm run browser
 ```
 
-Use the same secret on the app and browser processes. Browser navigation is read-only with JavaScript disabled. Private addresses, redirects, and authenticated pages are unsupported; provide a canonical public URL. This is a bounded research tool, not a general desktop or shell.
+Configure `BROWSER_SECRET` (24+ characters) and `OBSCURA_CDP_TOKEN` (32+ characters) in `.env`; keep the values private. JavaScript is enabled, but only public-address `GET` requests for supported resource types are allowed. Redirects, WebSockets, authenticated pages, and write actions are unsupported; provide the canonical public URL. This is a bounded research reader, not a general desktop or shell. For persistent interactive Dot computers, see [Computer setup](COMPUTERS.md); that separate OpenBot service retains its per-Dot profiles and human takeover.
 
 ## Composio
 
@@ -176,20 +181,20 @@ A configured key is not evidence of a successful call. Verify microphone access,
 
 ## Containers
 
-Set `OWNER_TOKEN` and `BROWSER_SECRET` to different random secrets of at least 24 characters in `.env`, then run:
+Set `OWNER_TOKEN` and `BROWSER_SECRET` to different random secrets of at least 24 characters, and `OBSCURA_CDP_TOKEN` to a random secret of at least 32 characters in `.env`, then run:
 
 ```sh
 docker compose up --build -d
 ```
 
-Open http://localhost:4310. The app port binds to loopback. The browser service is optional: set a 24+ character `BROWSER_SECRET` and run `docker compose --profile browser up --build` to enable it; it has no published port. Application metadata lives in the `opendots-data` volume.
+Open http://localhost:4310. The app port binds to loopback. The app, Obscura CDP endpoint, and browser gateway have no public ports; only the app is published on loopback. The compose health checks wait for the browser gateway to connect to Obscura. Application metadata lives in the `opendots-data` volume.
 
 ```sh
 # Stop services while retaining saved data.
 docker compose down
 ```
 
-For remote hosting, configure an HTTPS reverse proxy and the matching `APP_ORIGIN`. See [Security](../SECURITY.md) for the template's deployment boundary.
+For local development, install the official Obscura release for your platform from its [releases](https://github.com/h4ckf0r0day/obscura/releases). For a complete production deployment, environment reference, image update instructions, and ARM64 notes, see [Docker deployment](DOCKER.md). For remote hosting, configure an HTTPS reverse proxy and the matching `APP_ORIGIN`. See [Security](../SECURITY.md) for the template's deployment boundary.
 
 ## Automatic Learning
 

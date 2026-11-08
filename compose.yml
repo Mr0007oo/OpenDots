@@ -1,13 +1,14 @@
 services:
   app:
+    image: docker.io/mr0007oo/opendots:latest
     build:
       context: .
       target: app
     ports:
-      - '127.0.0.1:4310:4310'
+      - '127.0.0.1:${OPENDOTS_PORT:-4310}:4310'
     environment:
       OWNER_TOKEN: ${OWNER_TOKEN:?Set a 24+ character OWNER_TOKEN in .env}
-      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:4310}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:${OPENDOTS_PORT:-4310}}
       OWNER_ID: ${OWNER_ID:-opendots-owner}
       INTELLIGENCE_API_KEY: ${INTELLIGENCE_API_KEY:-}
       CPK_INTELLIGENCE_API_KEY: ${CPK_INTELLIGENCE_API_KEY:-}
@@ -33,7 +34,7 @@ services:
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-parallel}
       PARALLEL_API_KEY: ${PARALLEL_API_KEY:-}
       BROWSER_URL: http://browser:4311
-      BROWSER_SECRET: ${BROWSER_SECRET:-}
+      BROWSER_SECRET: ${BROWSER_SECRET:?Set a 24+ character BROWSER_SECRET in .env}
     volumes:
       - opendots-data:/data
     networks:
@@ -45,16 +46,32 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4310/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
   browser:
-    profiles: [browser]
     build:
       context: .
       target: browser
     environment:
-      BROWSER_SECRET: ${BROWSER_SECRET:-}
+      BROWSER_SECRET: ${BROWSER_SECRET:?Set a 24+ character BROWSER_SECRET in .env}
+      OBSCURA_CDP_URL: ws://obscura:9222
+      OBSCURA_CDP_TOKEN: ${OBSCURA_CDP_TOKEN:?Set a 32+ character OBSCURA_CDP_TOKEN in .env}
     networks:
       - browser-link
       - browser-egress
+      - obscura-link
+    depends_on:
+      obscura:
+        condition: service_started
     init: true
     restart: unless-stopped
     shm_size: 256mb
@@ -65,10 +82,51 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4311/health', { headers: { authorization: 'Bearer ' + process.env.BROWSER_SECRET } }).then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+  obscura:
+    image: h4ckf0r0day/obscura@sha256:76522dd288b0c0186b360fd6e6133ef55908e1fc3b9c4b7ad6240bf8682d998c
+    command:
+      [
+        'serve',
+        '--port',
+        '9222',
+        '--host',
+        '0.0.0.0',
+        '--storage-dir',
+        '/tmp/obscura',
+      ]
+    environment:
+      OBSCURA_CDP_TOKEN: ${OBSCURA_CDP_TOKEN:?Set a 32+ character OBSCURA_CDP_TOKEN in .env}
+    user: '65532:65532'
+    networks:
+      - obscura-link
+    init: true
+    restart: unless-stopped
+    shm_size: 256mb
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,uid=65532,gid=65532,mode=700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 networks:
   browser-link:
     internal: true
   app-egress:
   browser-egress:
+  obscura-link:
+    internal: true
 volumes:
   opendots-data:
