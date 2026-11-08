@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
@@ -58,3 +58,37 @@ jobs:
             --tag ghcr.io/${REPO}/browser:latest \
             --tag ghcr.io/${REPO}/browser:${{ github.sha }} \
             --push .
+      - name: Make Docker packages public
+        run: |
+          echo "Updating package visibility to public..."
+          for PACKAGE in app browser; do
+            curl -X PATCH \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              https://api.github.com/user/packages/container/${{ github.event.repository.name }}%2F${PACKAGE}/visibility \
+              -d '{"visibility":"public"}' || true
+          done
+      - name: Echo Image URLs and Pull Commands
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "=========================================="
+          echo "🚀 Docker Images Published & Made Public!"
+          echo "=========================================="
+          echo ""
+          echo "📦 Application Image URL:"
+          echo "  ghcr.io/${REPO}/app:latest"
+          echo "  ghcr.io/${REPO}/app:${{ github.sha }}"
+          echo ""
+          echo "📥 Application Pull Command:"
+          echo "  docker pull ghcr.io/${REPO}/app:latest"
+          echo ""
+          echo "🌐 Upstream Browser Image Base:"
+          echo "  h4ckf0r0day/obscura@sha256:76522dd288b0c0186b360fd6e6133ef55908e1fc3b9c4b7ad6240bf8682d998c"
+          echo ""
+          echo "🌐 Browser Gateway Image URL (Published):"
+          echo "  ghcr.io/${REPO}/browser:latest"
+          echo "  ghcr.io/${REPO}/browser:${{ github.sha }}"
+          echo ""
+          echo "📥 Browser Gateway Pull Command:"
+          echo "  docker pull h4ckf0r0day/obscura@sha256:76522dd288b0c0186b360fd6e6133ef55908e1fc3b9c4b7ad6240bf8682d998c"
+          echo "=========================================="
