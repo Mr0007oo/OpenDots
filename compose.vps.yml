@@ -1,0 +1,13 @@
+# OCI VPS overlay: connect only the app to the existing Caddy network.
+# Keep the base app port bound to 127.0.0.1; Caddy reaches it over this network.
+services:
+  app:
+    networks:
+      caddy-proxy:
+        aliases:
+          - opendots-app
+
+networks:
+  caddy-proxy:
+    external: true
+    name: freellm_0007-network
