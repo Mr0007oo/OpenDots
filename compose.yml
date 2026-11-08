@@ -1,9 +1,6 @@
 services:
   app:
-    image: docker.io/mr0007oo/opendots:latest
-    build:
-      context: .
-      target: app
+    image: ghcr.io/mr0007oo/opendots/app:latest
     ports:
       - '127.0.0.1:${OPENDOTS_PORT:-4310}:4310'
     environment:
@@ -58,9 +55,7 @@ services:
       timeout: 5s
       retries: 3
   browser:
-    build:
-      context: .
-      target: browser
+    image: ghcr.io/mr0007oo/opendots/browser:latest
     environment:
       BROWSER_SECRET: ${BROWSER_SECRET:?Set a 24+ character BROWSER_SECRET in .env}
       OBSCURA_CDP_URL: ws://obscura:9222

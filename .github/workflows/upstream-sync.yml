@@ -24,9 +24,9 @@ concurrency:
 
 jobs:
   sync-and-publish:
-    name: Merge upstream, run CI, and publish the app image
+    name: Merge upstream, run CI, and publish images
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
       UPSTREAM_REPO: https://github.com/CopilotKit/OpenDots.git
       DOCKERHUB_NAMESPACE: mr0007oo
@@ -297,6 +297,40 @@ jobs:
           echo "- Published: ${LATEST_IMAGE}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Published: ${VERSION_IMAGE}" >> "$GITHUB_STEP_SUMMARY"
           echo "- AMD64 and ARM64 manifests verified for all published tags." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch GHCR publication for promoted main
+        if: steps.detect.outputs.needs_sync == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          main_sha="${{ steps.candidate.outputs.candidate_sha }}"
+          dispatch_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run ci.yml --ref main --field publish_images=true
+
+          publish_run_id=""
+          for attempt in $(seq 1 60); do
+            publish_run_id="$(gh run list \
+              --workflow ci.yml \
+              --branch main \
+              --event workflow_dispatch \
+              --json databaseId,headSha,createdAt \
+              --limit 20 | jq -r --arg sha "$main_sha" --arg started "$dispatch_started" \
+                '[.[] | select(.headSha == $sha and .createdAt >= $started)] | first | .databaseId // empty')"
+            if [[ -n "$publish_run_id" ]]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [[ -z "$publish_run_id" ]]; then
+            echo "No GHCR publish run appeared for promoted main $main_sha." >&2
+            exit 1
+          fi
+
+          timeout 300m gh run watch "$publish_run_id" --exit-status --interval 15
+          echo "- GHCR publication completed for promoted main ${main_sha}; all repository-owned images and both architectures were verified." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write final workflow summary
         if: always()

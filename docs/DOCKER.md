@@ -56,8 +56,10 @@ existing `BROWSER_URL`/`BROWSER_SECRET` interface. Other app settings, including
 
 ## Build and run from source
 
+For an explicit local source build, add the source override:
+
 ```sh
-docker compose up --build -d
+docker compose -f compose.yml -f compose.source.yml up --build -d
 docker compose ps
 docker compose logs --tail=100 app browser obscura
 ```
@@ -90,63 +92,94 @@ CopilotKit Intelligence deployment. Obscura's per-request research contexts are
 ephemeral; persistent per-Dot browser profiles remain in the OpenBot computer
 volumes.
 
-## Published image
+## Published images and public packages
 
-The application image is intended to be published as
-[`docker.io/mr0007oo/opendots:latest`](https://hub.docker.com/r/mr0007oo/opendots).
-The repository's application version is `0.1.0`. Published version tags include
-the application version and the exact source commit, for example
-`v0.1.0-a1b2c3d4e5f6`; this avoids moving a plain semver tag when upstream
-changes do not bump the application version.
-The project Compose file builds the browser gateway from source and pulls the
-pinned Obscura image.
+The `CI` workflow builds and publishes all repository-owned deployment images
+to GHCR for `linux/amd64` and `linux/arm64`:
 
-After the source tests and both target builds pass, authenticate locally and
-publish both supported architectures:
+| Purpose                           | Image                                  |
+| --------------------------------- | -------------------------------------- |
+| OpenDots application              | `ghcr.io/mr0007oo/opendots/app`        |
+| Browser gateway                   | `ghcr.io/mr0007oo/opendots/browser`    |
+| Computer supervisor               | `ghcr.io/mr0007oo/opendots/supervisor` |
+| Dynamically launched Dot computer | `ghcr.io/mr0007oo/opendots/computer`   |
+
+Pushes to `main` publish `latest` and `sha-<full-commit-sha>` tags. A `v*`
+version-tag push publishes the version tag and commit-SHA tag. Manual runs can
+publish from `main` or a `v*` tag by enabling the `publish_images` input.
+Pull-request and other branch builds do not publish. The workflow lowercases
+`GITHUB_REPOSITORY` before constructing image names, so the repository's
+mixed-case GitHub owner/name never produces uppercase GHCR references.
+
+Publishing does **not** make packages public automatically. On 2026-11-08,
+anonymous registry checks confirmed that the existing `app:latest` and
+`browser:latest` packages are public and each manifest contains
+`linux/amd64` and `linux/arm64`. The `supervisor` and `computer` references
+were not anonymously readable, so their package existence and visibility
+cannot be confirmed. After the first successful publish, verify all four and
+make any non-public package public:
+
+1. Open the repository owner's **Packages** page on GitHub and select the
+   `opendots/app` package.
+2. Open **Package settings**, choose **Change visibility**, select **Public**,
+   and confirm the package name when prompted.
+3. Repeat for `opendots/browser`, `opendots/supervisor`, and
+   `opendots/computer`.
+4. Confirm each package settings page shows **Public** before relying on
+   anonymous pulls. If a package must remain private, authenticate Docker on
+   the VPS using a GitHub token with read-package access instead.
+
+The pinned `h4ckf0r0day/obscura` image is third-party and is not published by
+this workflow. Its digest-pinned manifest was inspected for both required
+architectures.
+
+## Deploy published images on the VPS
+
+Check out this repository on the VPS and configure `.env` using `.env.example`.
+Keep the existing application/browser secrets and computer supervisor/token
+secrets set. The Compose file does not make CopilotKit Intelligence credentials
+newly required. The `freellm_0007-network` external Docker network must already
+exist and be shared with the reverse proxy; the app retains its loopback
+published port and its existing isolated service networks.
+
+Pull every image, including the profiled image the supervisor launches for Dot
+computers, then start the services without building locally:
 
 ```sh
-docker login --username Mr0007oo
-GIT_SHA="$(git rev-parse --short=12 HEAD)"
-APP_VERSION="$(node -p "require('./package.json').version" | tr '[:upper:]' '[:lower:]')"
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --target app \
-  --tag docker.io/mr0007oo/opendots:latest \
-  --tag "docker.io/mr0007oo/opendots:v${APP_VERSION}-${GIT_SHA}" \
-  --push .
-docker buildx imagetools inspect docker.io/mr0007oo/opendots:latest
-docker buildx imagetools inspect "docker.io/mr0007oo/opendots:v${APP_VERSION}-${GIT_SHA}"
+docker compose \
+  -f compose.yml \
+  -f compose.selfhosted.yml \
+  -f compose.computers.yml \
+  -f compose.computers-app.yml \
+  --profile computer-runtime \
+  pull
+
+docker compose \
+  -f compose.yml \
+  -f compose.selfhosted.yml \
+  -f compose.computers.yml \
+  -f compose.computers-app.yml \
+  up -d --no-build app browser obscura computer-supervisor
 ```
 
-`docker login` prompts for a Docker Hub access token; do not put it in a command
-line or repository file. For a fresh deployment from the published app image, check out this repository
-for its Compose configuration, build the small browser gateway, then start with
-the pulled app image:
+The external reverse proxy can reach the app at `app:4310` on
+`freellm_0007-network`. Ports `4311` and `9222` remain unpublished. The
+`computer-image` profile service is a pull-only target and is intentionally
+not started; the supervisor uses the same GHCR image for dynamically created
+computer containers.
 
-```sh
-docker compose pull app
-docker compose build browser
-docker compose up -d --no-build
-```
+For later image updates, run the same `pull` command and then the same
+`up -d --no-build` command. Do not pass `-v` to `docker compose down` unless
+you intend to remove the persistent data volumes.
 
-The app service uses the published image when available and retains a build
-target for source deployments. For source deployments, run
-`docker compose up --build -d`.
+## Source updates
 
-## Updating
-
-For source deployments, update the repository and rebuild:
+For a source deployment, update the repository and explicitly use its build
+override:
 
 ```sh
 git pull --ff-only
-docker compose up --build -d
-```
-
-For image deployments, pull and recreate without deleting persistent volumes:
-
-```sh
-docker compose pull
-docker compose up -d --no-build
+docker compose -f compose.yml -f compose.source.yml up --build -d
 ```
 
 ## Troubleshooting
@@ -175,28 +208,17 @@ npm run lint
 npm run typecheck
 npm test
 npm run build
-docker compose config
-docker compose build app browser
-docker compose up -d
-docker compose ps
+docker compose \
+  -f compose.yml \
+  -f compose.selfhosted.yml \
+  -f compose.computers.yml \
+  -f compose.computers-app.yml \
+  config --quiet
+docker compose -f compose.yml -f compose.source.yml config --quiet
 ```
 
-Latest Codespace verification:
-
-- `npm test`: 57 files and 360 tests passed.
-- Formatting, lint, typecheck, and production build passed.
-- The Compose app, browser gateway, and Obscura services started; app and
-  gateway health checks passed. A live `POST /browse` to `https://example.com/`
-  returned the page title, text, and screenshot.
-- A SQLite test row survived app container recreation in the named volume.
-- The local app image was verified as `linux/amd64` and runs as the non-root
-  `node` user. The Codespace Buildx worker does not advertise ARM64, so an
-  ARM64 app build/start and Ampere runtime remain unverified.
-- Docker Hub manifest inspection returned `insufficient_scope`; no image was
-  published. The GitHub CLI is not authenticated, so no commit or push was
-  attempted.
-
-Multi-platform image manifests verify architecture availability, but an
-amd64-only Codespace cannot prove that the image starts on physical Ampere
-hardware. The `linux/arm64` Obscura image is available upstream; the app image
-must still be built and started for ARM64 before claiming runtime verification.
+The publishing workflow builds each of the four repository-owned images for
+both requested platforms and checks the published manifest before succeeding.
+That manifest check verifies architecture availability, not runtime behavior
+on physical Ampere hardware; run the stack on the VPS to verify the final
+deployment.

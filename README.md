@@ -66,7 +66,7 @@ Give each Dot a name, role, instructions, and permitted tools. A researcher can 
 
 Each Dot can have its own computer, using [OpenBot](https://github.com/CopilotKit/OpenBot)'s container supervisor and computer service. Its browser profile and workspace files persist across stop/start. The Computer panel exposes browser control, human takeover, files, terminal output, and activity, with browser, file, and shell permissions set per Dot. The application keeps service credentials on the server and derives a different computer credential for each Dot.
 
-See [Computer setup](docs/COMPUTERS.md) to build the pinned services and connect your deployment. Computer tools require those services; an unconfigured template does not execute commands on your host.
+See [Computer setup](docs/COMPUTERS.md) to pull the published pinned services and connect your deployment. Computer tools require those services; an unconfigured template does not execute commands on your host.
 
 <div align="center">
 

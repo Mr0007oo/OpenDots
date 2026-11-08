@@ -184,10 +184,11 @@ A configured key is not evidence of a successful call. Verify microphone access,
 Set `OWNER_TOKEN` and `BROWSER_SECRET` to different random secrets of at least 24 characters, and `OBSCURA_CDP_TOKEN` to a random secret of at least 32 characters in `.env`, then run:
 
 ```sh
-docker compose up --build -d
+docker compose pull
+docker compose up -d
 ```
 
-Open http://localhost:4310. The app port binds to loopback. The app, Obscura CDP endpoint, and browser gateway have no public ports; only the app is published on loopback. The compose health checks wait for the browser gateway to connect to Obscura. Application metadata lives in the `opendots-data` volume.
+Open http://localhost:4310. The app port binds to loopback. The app, Obscura CDP endpoint, and browser gateway have no public ports; only the app is published on loopback. The compose health checks wait for the browser gateway to connect to Obscura. Application metadata lives in the `opendots-data` volume. For local builds from source, see [Docker deployment](DOCKER.md#build-and-run-from-source).
 
 ```sh
 # Stop services while retaining saved data.

@@ -1,11 +1,20 @@
 name: CI
 on:
   push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish_images:
+        description: Publish images from main or a version tag
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
-  packages: write
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -26,69 +35,273 @@ jobs:
       - run: npm run typecheck
       - run: npm test -- --testTimeout=20000
       - run: npm run build
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Validate self-hosted Compose configuration
+        run: |
+          export OWNER_TOKEN=012345678901234567890123456789
+          export BROWSER_SECRET=abcdefghijabcdefghijabcdefghij
+          export OBSCURA_CDP_TOKEN=0123456789012345678901234567890123456789
+          export COMPUTER_SUPERVISOR_TOKEN=012345678901234567890123456789
+          export COMPUTER_TOKEN=abcdefghijabcdefghijabcdefghij
+          docker compose \
+            -f compose.yml \
+            -f compose.selfhosted.yml \
+            -f compose.computers.yml \
+            -f compose.computers-app.yml \
+            config --quiet
+          docker compose -f compose.yml -f compose.source.yml config --quiet
+
+  publish-images:
+    needs: check
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_images &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Normalize GHCR image namespace
+        id: image-base
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          image_base="ghcr.io/${REPO}"
+          if [[ "$REPO" != "${REPO,,}" ]]; then
+            echo "Generated GHCR image namespace is not lowercase." >&2
+            exit 1
+          fi
+          echo "value=${image_base}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Validate Docker Compose configuration
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Prepare image tags
+        id: image-tags
+        shell: bash
+        env:
+          IMAGE_BASE: ${{ steps.image-base.outputs.value }}
         run: |
-          OWNER_TOKEN=012345678901234567890123456789 \
-          BROWSER_SECRET=abcdefghijabcdefghijabcdefghij \
-          OBSCURA_CDP_TOKEN=0123456789012345678901234567890123456789 \
-          docker compose config --quiet
-      - name: Build and push application image for amd64 and arm64
-        run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --target app \
-            --tag ghcr.io/${REPO}/app:latest \
-            --tag ghcr.io/${REPO}/app:${{ github.sha }} \
-            --push .
-      - name: Build and push browser gateway image for amd64 and arm64
-        run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --target browser \
-            --tag ghcr.io/${REPO}/browser:latest \
-            --tag ghcr.io/${REPO}/browser:${{ github.sha }} \
-            --push .
-      - name: Make Docker packages public
-        run: |
-          echo "Updating package visibility to public..."
-          for PACKAGE in app browser; do
-            curl -X PATCH \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              https://api.github.com/user/packages/container/${{ github.event.repository.name }}%2F${PACKAGE}/visibility \
-              -d '{"visibility":"public"}' || true
+          set -euo pipefail
+          tags=("sha-${GITHUB_SHA}")
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            tags+=(latest)
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tags+=("$GITHUB_REF_NAME")
+          fi
+          for name in app browser supervisor computer; do
+            {
+              echo "${name}<<IMAGE_TAGS"
+              for tag in "${tags[@]}"; do
+                echo "${IMAGE_BASE}/${name}:${tag}"
+              done
+              echo IMAGE_TAGS
+            } >> "$GITHUB_OUTPUT"
           done
-      - name: Echo Image URLs and Pull Commands
+      - name: Build and publish application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: app
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image-tags.outputs.app }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+      - name: Build and publish browser gateway image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: browser
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image-tags.outputs.browser }}
+          cache-from: type=gha,scope=browser
+          cache-to: type=gha,mode=max,scope=browser
+      - name: Build and publish computer supervisor image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./deployment/computers/supervisor.Dockerfile
+          build-contexts: |
+            openbot=https://github.com/CopilotKit/OpenBot.git#b6932d31a8d6e7896c15139dfc27a6c6911deb27
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image-tags.outputs.supervisor }}
+          cache-from: type=gha,scope=supervisor
+          cache-to: type=gha,mode=max,scope=supervisor
+      - name: Build and publish computer runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: https://github.com/CopilotKit/OpenBot.git#b6932d31a8d6e7896c15139dfc27a6c6911deb27
+          file: agent-computer/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image-tags.outputs.computer }}
+          cache-from: type=gha,scope=computer
+          cache-to: type=gha,mode=max,scope=computer
+      - name: Verify published image manifests
+        id: manifests
+        shell: bash
+        env:
+          IMAGE_BASE: ${{ steps.image-base.outputs.value }}
         run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          set -euo pipefail
+          tags=("sha-${GITHUB_SHA}")
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            tags+=(latest)
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tags+=("$GITHUB_REF_NAME")
+          fi
+          manifest_file="$(mktemp)"
+          trap 'rm -f "$manifest_file"' EXIT
+          for name in app browser supervisor computer; do
+            for tag in "${tags[@]}"; do
+              image="${IMAGE_BASE}/${name}:${tag}"
+              docker buildx imagetools inspect --raw "$image" > "$manifest_file"
+              for architecture in amd64 arm64; do
+                jq -e --arg architecture "$architecture" \
+                  'any(.manifests[]; .platform.os == "linux" and .platform.architecture == $architecture)' \
+                  "$manifest_file" >/dev/null
+              done
+              echo "Verified linux/amd64 and linux/arm64 in ${image}"
+            done
+          done
+      - name: Make GHCR packages public
+        id: visibility
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_BASE: ${{ steps.image-base.outputs.value }}
+        run: |
+          set -euo pipefail
+          OWNER="${IMAGE_BASE#ghcr.io/}"
+          OWNER="${OWNER%%/*}"
+          REPOSITORY="${IMAGE_BASE##*/}"
+          failures=0
+
+          echo "## GHCR package visibility" >> "$GITHUB_STEP_SUMMARY"
+          record_failure() {
+            echo "::warning::${1}"
+            echo "- **Action required:** ${1} Check package ownership, repository Actions \`packages: write\` permission, and package settings; set visibility to Public manually." >> "$GITHUB_STEP_SUMMARY"
+            failures=$((failures + 1))
+          }
+
+          for image in app browser supervisor computer; do
+            package="${REPOSITORY}%2F${image}"
+            package_url="https://api.github.com/user/packages/container/${package}"
+            visibility_url="${package_url}/visibility"
+            if ! package_info=$(curl --fail-with-body --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$package_url"); then
+              record_failure "Could not read visibility for GHCR package ${OWNER}/${REPOSITORY}/${image}."
+            elif [[ "$(jq -r '.visibility // empty' <<< "$package_info")" == "public" ]]; then
+              echo "- Verified \`${OWNER}/${REPOSITORY}/${image}\` is public." >> "$GITHUB_STEP_SUMMARY"
+            elif ! curl --fail-with-body --silent --show-error \
+              --request PATCH \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$visibility_url" \
+              --data '{"visibility":"public"}' >/dev/null; then
+              record_failure "Could not make GHCR package ${OWNER}/${REPOSITORY}/${image} public."
+            elif ! package_info=$(curl --fail-with-body --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$package_url"); then
+              record_failure "Could not verify visibility for GHCR package ${OWNER}/${REPOSITORY}/${image} after updating it."
+            elif [[ "$(jq -r '.visibility // empty' <<< "$package_info")" != "public" ]]; then
+              record_failure "GHCR package ${OWNER}/${REPOSITORY}/${image} is not public after the visibility update."
+            else
+              echo "- Set and verified \`${OWNER}/${REPOSITORY}/${image}\` is public." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+          if [[ "$failures" -gt 0 ]]; then
+            echo "One or more GHCR package visibility updates failed. See the job summary for manual steps." >&2
+            exit 1
+          fi
+      - name: Echo Image URLs and Pull Commands
+        if: always() && steps.manifests.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_BASE="ghcr.io/${REPO}"
+          SHA_TAG="sha-${GITHUB_SHA}"
+          PUBLISHED_TAGS="$SHA_TAG"
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            PUBLISHED_TAGS="${PUBLISHED_TAGS}, latest"
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            PUBLISHED_TAGS="${PUBLISHED_TAGS}, ${GITHUB_REF_NAME}"
+          fi
+          UPSTREAM_OBSCURA="h4ckf0r0day/obscura@sha256:76522dd288b0c0186b360fd6e6133ef55908e1fc3b9c4b7ad6240bf8682d998c"
+
           echo "=========================================="
-          echo "🚀 Docker Images Published & Made Public!"
+          echo "🚀 OpenDots Images Published to GHCR"
           echo "=========================================="
+          echo "Tags: ${PUBLISHED_TAGS}"
           echo ""
-          echo "📦 Application Image URL:"
-          echo "  ghcr.io/${REPO}/app:latest"
-          echo "  ghcr.io/${REPO}/app:${{ github.sha }}"
-          echo ""
-          echo "📥 Application Pull Command:"
-          echo "  docker pull ghcr.io/${REPO}/app:latest"
-          echo ""
-          echo "🌐 Upstream Browser Image Base:"
-          echo "  h4ckf0r0day/obscura@sha256:76522dd288b0c0186b360fd6e6133ef55908e1fc3b9c4b7ad6240bf8682d998c"
-          echo ""
-          echo "🌐 Browser Gateway Image URL (Published):"
-          echo "  ghcr.io/${REPO}/browser:latest"
-          echo "  ghcr.io/${REPO}/browser:${{ github.sha }}"
-          echo ""
-          echo "📥 Browser Gateway Pull Command:"
-          echo "  docker pull h4ckf0r0day/obscura@sha256:76522dd288b0c0186b360fd6e6133ef55908e1fc3b9c4b7ad6240bf8682d998c"
+
+          for entry in \
+            "Application|app" \
+            "Browser Gateway|browser" \
+            "Supervisor|supervisor" \
+            "Computer Runtime|computer"; do
+            label="${entry%%|*}"
+            name="${entry##*|}"
+            image="${IMAGE_BASE}/${name}"
+            echo "📦 ${label} Image URL:"
+            echo "  ${image}"
+            echo ""
+            echo "📥 ${label} Pull Command:"
+            echo "  docker pull ${image}"
+            echo ""
+            echo "🔖 ${label} SHA-tagged Image:"
+            echo "  ${image}:${SHA_TAG}"
+            echo ""
+            echo "📥 ${label} SHA-tagged Pull Command:"
+            echo "  docker pull ${image}:${SHA_TAG}"
+            echo ""
+          done
+
+          echo "🌐 Upstream Obscura Base Image (third-party; not the browser gateway):"
+          echo "  ${UPSTREAM_OBSCURA}"
           echo "=========================================="
+
+          {
+            echo "## Published GHCR images"
+            echo ""
+            echo "Tags for this run: \`${PUBLISHED_TAGS}\`"
+            echo ""
+            echo "| Image | URL | Pull command | SHA-tagged reference | SHA pull command |"
+            echo "| --- | --- | --- | --- | --- |"
+            for name in app browser supervisor computer; do
+              image="${IMAGE_BASE}/${name}"
+              echo "| \`${name}\` | \`${image}\` | \`docker pull ${image}\` | \`${image}:${SHA_TAG}\` | \`docker pull ${image}:${SHA_TAG}\` |"
+            done
+            echo ""
+            echo "Upstream Obscura base image (third-party; not the published browser gateway): \`${UPSTREAM_OBSCURA}\`"
+            if [[ "${{ steps.visibility.outcome }}" == "success" ]]; then
+              echo ""
+              echo "All four GHCR packages were set to public."
+            else
+              echo ""
+              echo "**Package visibility needs manual attention.** See the visibility step above and set failed packages to Public in GitHub package settings."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -17,24 +17,24 @@ COMPUTER_NAMESPACE=opendots
 
 Do not use the placeholder values. The supervisor token authorizes lifecycle requests. The computer token is a master used to derive a different credential for each Dot; the master stays in the application and supervisor.
 
-Build both images before starting the supervisor:
+Pull the published supervisor and computer-runtime images before starting the supervisor:
 
 ```sh
-docker compose -f compose.computers.yml build computer-image computer-supervisor
+docker compose --profile computer-runtime -f compose.computers.yml pull computer-image computer-supervisor
 docker compose -f compose.computers.yml up -d computer-supervisor
 npm run dev
 ```
 
-The computer-image service is a build target, not a shared computer to run. The supervisor creates a container when you start a Dot's computer. In this local arrangement, each computer publishes a dynamic loopback port for the app to reach. Port 4312 is the loopback supervisor endpoint. The local control network uses a normal bridge so Docker can publish that port. The container-app overlay makes the control network internal and removes the host port; the app then connects through service DNS.
+The profiled `computer-image` service is a pull target, not a shared computer to run. The supervisor uses that exact published image to create one container when you start a Dot's computer. In this local arrangement, each computer publishes a dynamic loopback port for the app to reach. Port 4312 is the loopback supervisor endpoint. The local control network uses a normal bridge so Docker can publish that port. The container-app overlay makes the control network internal and removes the host port; the app then connects through service DNS.
 
 Open a Dot's **Computer** panel, enable computer access and the capabilities you want, then choose **Start**. Check its status, navigate to a page, and refresh its screen. Only grant shell access when that Dot needs to run commands.
 
 ## Run the application in containers
 
-Configure the existing `OWNER_TOKEN` and `BROWSER_SECRET` as well as the computer secrets. Use the overlay that connects the app to the supervisor and computer network:
+Configure the existing `OWNER_TOKEN` and `BROWSER_SECRET` as well as the computer secrets. The source-build override is optional; the default uses published images. Use the overlays that connect the app to the supervisor and computer network:
 
 ```sh
-docker compose -f compose.yml -f compose.computers.yml -f compose.computers-app.yml build computer-image computer-supervisor app browser
+docker compose --profile computer-runtime -f compose.yml -f compose.computers.yml -f compose.computers-app.yml pull
 docker compose -f compose.yml -f compose.computers.yml -f compose.computers-app.yml up -d app browser computer-supervisor
 ```
 

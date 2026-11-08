@@ -1,0 +1,11 @@
+# Optional local source-build override. The default Compose deployment pulls
+# the published GHCR images and has no local build requirements.
+services:
+  app:
+    build:
+      context: .
+      target: app
+  browser:
+    build:
+      context: .
+      target: browser

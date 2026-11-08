@@ -11,7 +11,8 @@ This repository includes an upstream synchronization workflow for `CopilotKit/Op
 - Checks that the candidate contains the fetched upstream commit and that the Obscura integration, app/browser Docker targets, tool/browser tests, deployment docs, and required custom README sections still exist.
 - Pushes the candidate branch, explicitly dispatches the regular CI workflow for its exact commit, and waits for that run to succeed.
 - Fast-forwards fork `main` only after CI passes and only if `main` has not advanced independently.
-- Publishes the **application** Docker target for `linux/amd64` and `linux/arm64` only after the tested candidate is on `main`, then checks both architecture descriptors in the published manifests.
+- Publishes the existing Docker Hub application image after the tested candidate is on `main`.
+- Dispatches `ci.yml` for promoted `main` to publish the app, browser gateway, computer supervisor, and computer runtime images to GHCR, and waits for each multi-platform manifest check.
 - Writes a summary to the GitHub Actions job output so upstream changes and any blockers are visible.
 
 ## Preservation and failure behavior
@@ -34,7 +35,7 @@ The workflow runs on:
 
 A sync is skipped when the upstream branch has no new commits and the manual run is not forcing a check.
 
-Because a push made with `GITHUB_TOKEN` does not start another `push`-triggered workflow, the sync workflow explicitly dispatches `ci.yml` on its candidate branch and waits for that run. `ci.yml` also runs on normal pushes and pull requests.
+Because a push made with `GITHUB_TOKEN` does not start another `push`-triggered workflow, the sync workflow explicitly dispatches `ci.yml` on its candidate branch and waits for CI. After promoting the tested candidate to `main`, it dispatches `ci.yml` again with image publishing enabled and waits for all GHCR image builds and manifest checks. `ci.yml` also runs on normal pushes and pull requests.
 
 ## Required GitHub Secrets
 
@@ -59,7 +60,15 @@ The workflow publishes to:
 - `docker.io/mr0007oo/opendots:latest`
 - `docker.io/mr0007oo/opendots:v<package-version>-<candidate-short-sha>` (for example `v0.1.0-a1b2c3d4e5f6`)
 
-The image namespace and repository are explicitly fixed as lowercase `mr0007oo/opendots`; they are not derived from the mixed-case GitHub owner/repository identifier. The commit-qualified version tag identifies the exact merged candidate and avoids silently moving a plain semver tag on every upstream sync. `latest` is intentionally updated on each successful publication. Buildx publishes only the Dockerfile's `app` target as a multi-platform manifest; Compose separately builds the browser gateway and pulls the pinned Obscura image. The final workflow step verifies both `linux/amd64` and `linux/arm64` descriptors for both tags.
+The image namespace and repository are explicitly fixed as lowercase `mr0007oo/opendots`; they are not derived from the mixed-case GitHub owner/repository identifier. The commit-qualified version tag identifies the exact merged candidate and avoids silently moving a plain semver tag on every upstream sync. `latest` is intentionally updated on each successful publication. Buildx publishes the Dockerfile's `app` target as a multi-platform manifest. Compose uses separately published GHCR browser, supervisor, and computer images, and pulls the pinned Obscura image from its upstream publisher. The final workflow step verifies both `linux/amd64` and `linux/arm64` descriptors for both Docker Hub app tags.
+
+The separate GHCR image workflow lowercases `GITHUB_REPOSITORY` and publishes
+`ghcr.io/mr0007oo/opendots/{app,browser,supervisor,computer}`. Each image gets a
+full commit-SHA tag and, for main or version-tag releases, the appropriate
+`latest` or version tag. The workflow verifies both architecture descriptors
+for every published tag. Package visibility is not changed by Actions; use the
+manual GHCR package settings steps in [Docker deployment](DOCKER.md#published-images-and-public-packages)
+to make all four packages public.
 
 ## Manual intervention for conflicts
 

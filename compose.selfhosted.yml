@@ -1,0 +1,11 @@
+# Attach only the application to the existing reverse-proxy network.
+# The app's other private and egress networks remain defined in compose.yml.
+services:
+  app:
+    networks:
+      - freellm_0007-network
+
+networks:
+  freellm_0007-network:
+    external: true
+    name: freellm_0007-network
